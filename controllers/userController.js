@@ -2,8 +2,6 @@ const pool = require("../config/db");
 
 const getUsers = async (req, res) => {
   try {
-    // Note: We are explicitly selecting columns and NOT including 'password_hash' for security reasons.
-    // Ensure you only fetch active/un-deleted users if that's your frontend requirement
     const result = await pool.query(
       "SELECT id, name, email, last_login, created_at, status FROM users ORDER BY last_login DESC"
     );
@@ -14,10 +12,10 @@ const getUsers = async (req, res) => {
   }
 };
 
-const updateUsersStatus = async (req, res, newStatus) => {
-  const { userIds } = req.body;
-
   if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+    console.log(
+      "[userController] Validation failed: userIds is empty or invalid."
+    );
     return res.status(400).json({ message: "Please provide user IDs" });
   }
 
@@ -26,52 +24,94 @@ const updateUsersStatus = async (req, res, newStatus) => {
     client = await pool.connect();
     await client.query("BEGIN");
 
-    // Security check: Ensure the current authenticated user isn't trying to block/delete themselves
-    if (
-      userIds.includes(req.user.id) &&
-      (newStatus === "blocked" || newStatus === "deleted")
-    ) {
-      await client.query("ROLLBACK");
-      return res
-        .status(403)
-        .json({ message: "You cannot block or delete your own account." });
-    }
+    const query = `UPDATE users SET status = $1 WHERE id = ANY($2::int[]) RETURNING id, name, email, status`;
+    console.log(
+      "[userController] Executing SQL Query for status update:",
+      query
+    );
+    console.log("[userController] With parameters:", [newStatus, userIds]);
 
-    let query;
-    let queryParams;
-    let successMessage;
+    const result = await client.query(query, [newStatus, userIds]);
 
-    if (newStatus === "deleted") {
-      // --- HARD DELETE IMPLEMENTATION ---
-      query = `DELETE FROM users WHERE id = ANY($1::int[]) RETURNING id`;
-      queryParams = [userIds];
-      successMessage = 'Users successfully deleted (hard delete)';
-    } else {
-      // --- SOFT UPDATE FOR BLOCK/UNBLOCK ---
-      query = `UPDATE users SET status = $1 WHERE id = ANY($2::int[]) RETURNING id, name, email, status`;
-      queryParams = [newStatus, userIds];
-      successMessage = `Users successfully ${
-        newStatus === "blocked" ? "blocked" : "unblocked"
-      }`;
-    }
-
-    const result = await client.query(query, queryParams);
+    console.log(
+      "[userController] SQL Query Result Rows for status update:",
+      result.rows
+    );
 
     await client.query("COMMIT");
     res.status(200).json({
-      message: successMessage,
-      // For hard delete, updatedUsers will contain the IDs of deleted users
-      // For soft update, it will contain full user objects
-      processedUserIds: result.rows.map(row => row.id), // Return IDs for consistency
+      message: `Users successfully ${
+        newStatus === "blocked" ? "blocked" : "unblocked"
+      }`,
+      updatedUsers: result.rows,
     });
   } catch (error) {
     if (client) {
       await client.query("ROLLBACK");
     }
-    console.error(`Error processing users to ${newStatus}:`, error.message);
+    console.error(
+      `[userController] ERROR: Server error updating user status to ${newStatus}:`,
+      error.message,
+      error.stack
+    );
     res
       .status(500)
-      .json({ message: `Server error processing users to ${newStatus}` });
+      .json({ message: `Server error updating users to ${newStatus}` });
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+};
+
+const hardDeleteUsers = async (req, res) => {
+  const { userIds } = req.body;
+
+  console.log(`[userController] Attempting to hard delete users`);
+  console.log("[userController] Received userIds for deletion:", userIds);
+  console.log(
+    "[userController] Authenticated user ID (making this request):",
+    req.user ? req.user.id : "N/A"
+  );
+
+  if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+    console.log(
+      "[userController] Validation failed: userIds is empty or invalid."
+    );
+    return res.status(400).json({ message: "Please provide user IDs" });
+  }
+
+  let client;
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const query = `DELETE FROM users WHERE id = ANY($1::int[]) RETURNING id, name, email`;
+    console.log("[userController] Executing SQL Query for deletion:", query);
+    console.log("[userController] With parameters:", [userIds]);
+
+    const result = await client.query(query, [userIds]);
+
+    console.log(
+      "[userController] SQL Query Result Rows for deletion:",
+      result.rows
+    );
+
+    await client.query("COMMIT");
+    res.status(200).json({
+      message: "Users deleted permanently!",
+      deletedUsers: result.rows,
+    });
+  } catch (error) {
+    if (client) {
+      await client.query("ROLLBACK");
+    }
+    console.error(
+      `[userController] ERROR: Server error deleting users:`,
+      error.message,
+      error.stack
+    );
+    res.status(500).json({ message: `Server error deleting users` });
   } finally {
     if (client) {
       client.release();
@@ -81,11 +121,12 @@ const updateUsersStatus = async (req, res, newStatus) => {
 
 const blockUsers = (req, res) => updateUsersStatus(req, res, "blocked");
 const unblockUsers = (req, res) => updateUsersStatus(req, res, "active");
-const deleteUsers = (req, res) => updateUsersStatus(req, res, "deleted");
+// Map deleteUsers to the new hardDeleteUsers function
+const deleteUsers = hardDeleteUsers;
 
 module.exports = {
   getUsers,
   blockUsers,
   unblockUsers,
-  deleteUsers,
+  deleteUsers, // Exporting hardDeleteUsers as deleteUsers
 };
