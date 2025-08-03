@@ -12,6 +12,9 @@ const getUsers = async (req, res) => {
   }
 };
 
+const updateUsersStatus = async (req, res, newStatus) => {
+  const { userIds } = req.body;
+
   if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
     console.log(
       "[userController] Validation failed: userIds is empty or invalid."
